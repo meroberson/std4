@@ -1296,6 +1296,9 @@ protected theorem dvd_of_mul_dvd_mul_right (kpos : 0 < k) (H : m * k ∣ n * k) 
 @[simp] theorem sum_append : Nat.sum (l₁ ++ l₂) = Nat.sum l₁ + Nat.sum l₂ := by
   induction l₁ <;> simp [*, Nat.add_assoc]
 
+theorem sum_eq_zero_iff (l : List Nat) : Nat.sum l = 0 ↔ l.all (fun n ↦ n == 0) := by
+  induction l <;> simp [*,Nat.add_eq_zero_iff,List.all]
+
 /-! ### shiftLeft and shiftRight -/
 
 @[simp] theorem shiftLeft_zero : n <<< 0 = n := rfl

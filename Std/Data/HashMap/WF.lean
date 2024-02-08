@@ -15,6 +15,10 @@ attribute [-simp] Bool.not_eq_true
 
 namespace Buckets
 
+private def find? [BEq α] [Hashable α] (self : Buckets α β) (k : α) :=
+  let ⟨i,_⟩ := mkIdx self.2 (hash k).toUSize
+  self.1[i].find? k
+
 @[ext] protected theorem ext : ∀ {b₁ b₂ : Buckets α β}, b₁.1.data = b₂.1.data → b₁ = b₂
   | ⟨⟨_⟩, _⟩, ⟨⟨_⟩, _⟩, rfl => rfl
 
@@ -59,6 +63,13 @@ theorem WF.update [BEq α] [Hashable α] {buckets : Buckets α β} {i d h} (H : 
     · next eq => exact eq ▸ h₂ (H.2 _ _) _ hp
     · simp at hi; exact H.2 i hi _ hp
 
+theorem update_find? [BEq α] [Hashable α] (buckets : Buckets α β) (i d h) (k : α) :
+    let ⟨iₖ,_⟩ := mkIdx buckets.property (hash k).toUSize
+    (buckets.update i d h).find? k =
+      if(i.toNat = iₖ.toNat) then d.find? k else buckets.find? k := by
+  simp ; split <;> simp[*,mkIdx,find?,update] at * <;>
+    [rw[Array.get_set_eq] ; (rw[Array.get_set_ne];simp[*])]
+
 end Buckets
 
 theorem reinsertAux_size [Hashable α] (data : Buckets α β) (a : α) (b : β) :
@@ -75,6 +86,22 @@ theorem reinsertAux_WF [BEq α] [Hashable α] {data : Buckets α β} {a : α} {b
   H.update (.cons h₁) fun
     | _, _, .head .. => rfl
     | H, _, .tail _ h => H _ h
+
+theorem reinsertAux_find? [BEq α] [Hashable α] [LawfulHashable α]
+    (data : Buckets α β) {a : α} {b : β} :
+    ∀ k : α, (reinsertAux data a b).find? k = if a == k then some b else data.find? k := by
+  intro k
+  simp[reinsertAux,Buckets.find?,Buckets.update,mkIdx]
+  rw[Array.get_set (hj := by exact (mkIdx data.property _).2)]
+  split
+  · next h =>
+    simp[mkIdx] at h
+    simp[←h,AssocList.toList,List.find?]
+    split <;> simp[*]
+  · next h =>
+    simp[mkIdx] at h
+    have hneq : ¬ a == k := by intro c ; simp[LawfulHashable.hash_eq c] at h
+    simp[hneq]
 
 theorem expand_size [Hashable α] {buckets : Buckets α β} :
     (expand sz buckets).buckets.size = buckets.size := by
@@ -110,23 +137,39 @@ where
       rwa [List.getD_eq_get?, List.get?_eq_get, Option.getD_some] at this
   termination_by source.size - i
 
-theorem expand_WF.foldl [BEq α] [Hashable α] (rank : α → Nat) {l : List (α × β)} {i : Nat}
+private def expand_WF_find?.foldl_find?_inv [BEq α] [Hashable α]
+    (m : Buckets α β) (rank : α → Nat) (l : List (α × β))
+    (i : Nat) (target: Buckets α β) (k : α) : Prop :=
+  (rank k < i → target.find? k = m.find? k) ∧
+  (rank k > i → target.find? k = none) ∧
+  (rank k = i → (target.find? k = m.find? k ∧ l.find? (·.1==k) = none) ∨
+    (target.find? k = none ∧ (l.find? (·.1==k)).map (·.2) = m.find? k))
+
+theorem expand_WF_find?.foldl [BEq α] [Hashable α] (rank : α → Nat) {l : List (α × β)} {i : Nat}
+    (m : Buckets α β)
     (hl₁ : ∀ [PartialEquivBEq α] [LawfulHashable α], l.Pairwise fun a b => ¬(a.1 == b.1))
     (hl₂ : ∀ x ∈ l, rank x.1 = i)
     {target : Buckets α β} (ht₁ : target.WF)
     (ht₂ : ∀ bucket ∈ target.1.data,
       bucket.All fun k _ => rank k ≤ i ∧
-        ∀ [PartialEquivBEq α] [LawfulHashable α], ∀ x ∈ l, ¬(x.1 == k)) :
+        ∀ [PartialEquivBEq α] [LawfulHashable α], ∀ x ∈ l, ¬(x.1 == k))
+    (hRank : ∀ [LawfulHashable α], ∀ a₁ a₂ : α, a₁ == a₂ → rank a₁ = rank a₂)
+    (hf : ∀ [PartialEquivBEq α] [LawfulHashable α],
+      ∀ k : α, expand_WF_find?.foldl_find?_inv m rank l i target k):
     (l.foldl (fun d x => reinsertAux d x.1 x.2) target).WF ∧
-    ∀ bucket ∈ (l.foldl (fun d x => reinsertAux d x.1 x.2) target).1.data,
-      bucket.All fun k _ => rank k ≤ i := by
+    (∀ bucket ∈ (l.foldl (fun d x => reinsertAux d x.1 x.2) target).1.data,
+      bucket.All fun k _ => rank k ≤ i) ∧
+    ∀ [PartialEquivBEq α] [LawfulHashable α], ∀ k : α,
+      expand_WF_find?.foldl_find?_inv m rank [] i
+        (l.foldl (fun d x => reinsertAux d x.1 x.2) target) k:= by
   induction l generalizing target with
-  | nil => exact ⟨ht₁, fun _ h₁ _ h₂ => (ht₂ _ h₁ _ h₂).1⟩
+  | nil => exact ⟨ht₁, fun _ h₁ _ h₂ => (ht₂ _ h₁ _ h₂).1, hf⟩
   | cons _ _ ih =>
     simp only [List.pairwise_cons, List.mem_cons, forall_eq_or_imp] at hl₁ hl₂ ht₂
     refine ih hl₁.2 hl₂.2
       (reinsertAux_WF ht₁ fun _ h => (ht₂ _ (Array.getElem_mem_data ..) _ h).2.1)
       (fun _ h => ?_)
+      (fun k => ?find_inv)
     simp [reinsertAux, Buckets.update] at h
     match List.mem_or_eq_of_mem_set h with
     | .inl h =>
@@ -139,10 +182,49 @@ theorem expand_WF.foldl [BEq α] [Hashable α] (rank : α → Nat) {l : List (α
       | _, .tail _ h =>
         have ⟨h₁, h₂⟩ := ht₂ _ (Array.getElem_mem_data ..) _ h
         exact ⟨h₁, h₂.2⟩
+    case find_inv head tail _ _ =>
+      unfold expand_WF_find?.foldl_find?_inv at hf ⊢
+      simp
+      refine ⟨?lt,?gt,?eq⟩
+      · intro hlt
+        have hne : ¬ head.fst == k := by intro c ; simp[←hRank _ _ c,hl₂.left] at hlt
+        rw[reinsertAux_find?]
+        simp[*,hf]
+      · intro hgt
+        have hne : ¬ head.fst == k := by intro c ; simp[←hRank _ _ c,hl₂.left] at hgt
+        rw[reinsertAux_find?]
+        simp[*]
+      · intro heq
+        rw[reinsertAux_find?]
+        have := (hf k).right.right heq
+        simp[List.find?] at this
+        cases hbeq:head.fst==k
+        case true =>
+          simp[*] at this
+          simp[*,List.find?_eq_none]
+          have : ∀ z, (head.fst == z) = true ↔ (z == k) = true := fun z => ⟨
+              fun h => PartialEquivBEq.trans (PartialEquivBEq.symm h) hbeq,
+              fun h => PartialEquivBEq.trans hbeq (PartialEquivBEq.symm h)⟩
+          simp[hl₁.left _,←this,hbeq]
+          exact Or.inl hl₁.left
+        case false => simp[*] at this ; simp[*]
 
-theorem expand_WF [BEq α] [Hashable α] {buckets : Buckets α β} (H : buckets.WF) :
-    (expand sz buckets).buckets.WF :=
-  go _ H.1 H.2 ⟨.mk' _, fun _ _ _ _ => by simp_all [Buckets.mk, List.mem_replicate]⟩
+private def expand_WF_find?.find?_inv [BEq α] [Hashable α]
+    (m : Buckets α β) (source : Array (AssocList α β))
+    (h: 0 < source.size) (i : Nat) (target : Buckets α β) (k : α) : Prop :=
+  let ⟨i₁, _⟩ := mkIdx h (hash k |>.toUSize)
+  expand_WF_find?.foldl_find?_inv m (fun a => (mkIdx h (hash a |>.toUSize)).1.toNat)
+    (if _:i<source.size then source[i].toList else []) i target k ∧
+  (i₁.toNat ≥ i → target.find? k = none ∧ source[i₁].find? k = m.find? k)
+
+theorem expand_WF_find? [BEq α] [Hashable α] {buckets : Buckets α β} (H : buckets.WF) :
+    (expand sz buckets).buckets.WF ∧
+    ∀ [LawfulHashable α] [PartialEquivBEq α], ∀ k : α,
+      (expand sz buckets).find? k = buckets.find? k :=
+  go _ H.1 H.2 ⟨.mk' _, fun _ _ _ _ => by simp_all [Buckets.mk, List.mem_replicate]⟩ buckets.2 (by
+    unfold expand_WF_find?.find?_inv expand_WF_find?.foldl_find?_inv
+    simp[Buckets.find?,Buckets.mk,mkArray,Array.getElem_eq_data_get,buckets.2]
+    exact ⟨ by intro., fun h => by simp[h]⟩)
 where
   go (i) {source : Array (AssocList α β)}
       (hs₁ : ∀ [LawfulHashable α] [PartialEquivBEq α], ∀ bucket ∈ source.data,
@@ -150,26 +232,84 @@ where
       (hs₂ : ∀ (j : Nat) (h : j < source.size),
         source[j].All fun k _ => ((hash k).toUSize % source.size).toNat = j)
       {target : Buckets α β} (ht : target.WF ∧ ∀ bucket ∈ target.1.data,
-        bucket.All fun k _ => ((hash k).toUSize % source.size).toNat < i) :
-      (expand.go i source target).WF := by
+        bucket.All fun k _ => ((hash k).toUSize % source.size).toNat < i)
+      (hss : 0 < source.size)
+      (hf : ∀ [LawfulHashable α] [PartialEquivBEq α], ∀ k : α,
+        expand_WF_find?.find?_inv buckets source hss i target k) :
+      (expand.go i source target).WF ∧
+      ∀ [LawfulHashable α] [PartialEquivBEq α], ∀ k : α,
+        (expand.go i source target).find? k = buckets.find? k := by
     unfold expand.go; split
     · next H =>
-      refine go (i+1) (fun _ hl => ?_) (fun i h => ?_) ?_
-      · match List.mem_or_eq_of_mem_set hl with
+      let rank (k : α) := ((hash k).toUSize % source.size).toNat
+      have := expand_WF_find?.foldl rank buckets ?_ (hs₂ _ H) ht.1 (fun _ h₁ _ h₂ => ?_)
+        (by intro _ _ _ h; simp[LawfulHashable.hash_eq h]) ?find_inv
+      · refine go (i+1) (fun _ hl => ?_) (fun i h => ?_) ?_ (by simp[*]) ?_
+        · match List.mem_or_eq_of_mem_set hl with
         | .inl hl => exact hs₁ _ hl
         | .inr e => exact e ▸ .nil
-      · simp [Array.getElem_eq_data_get, List.get_set]; split
-        · intro.
-        · exact hs₂ _ (by simp_all)
-      · let rank (k : α) := ((hash k).toUSize % source.size).toNat
-        have := expand_WF.foldl rank ?_ (hs₂ _ H) ht.1 (fun _ h₁ _ h₂ => ?_)
+        · simp [Array.getElem_eq_data_get, List.get_set]; split
+          · intro.
+          · exact hs₂ _ (by simp_all)
         · simp only [Array.get_eq_getElem, AssocList.foldl_eq, Array.size_set]
-          exact ⟨this.1, fun _ h₁ _ h₂ => Nat.lt_succ_of_le (this.2 _ h₁ _ h₂)⟩
-        · exact hs₁ _ (Array.getElem_mem_data ..)
-        · have := ht.2 _ h₁ _ h₂
-          refine ⟨Nat.le_of_lt this, fun _ h h' => Nat.ne_of_lt this ?_⟩
-          exact LawfulHashable.hash_eq h' ▸ hs₂ _ H _ h
-    · exact ht.1
+          exact ⟨this.1, fun _ h₁ _ h₂ => Nat.lt_succ_of_le (this.2.1 _ h₁ _ h₂)⟩
+        · intro _ _ k
+          simp[Array.get_eq_getElem, AssocList.foldl_eq, Array.size_set]
+          simp[expand_WF_find?.find?_inv,expand_WF_find?.foldl_find?_inv]
+          have := this.2.2 k
+          simp[expand_WF_find?.foldl_find?_inv] at this
+          simp[mkIdx]
+          refine ⟨⟨?_,?_,?_⟩,?_⟩
+          · intro h
+            simp_arith at h
+            cases Nat.eq_or_lt_of_le h
+            · next h =>
+              rw[h] at this
+              simp at this
+              cases this
+              · next h0 => rw[←h0]
+              · next h0 => simp[←h0.2,h0.1]
+            · next h =>
+              simp[h] at this
+              simp[this.1]
+          · intro h
+            simp[this.2.1 (Nat.lt_of_succ_lt h)]
+          · intro h
+            apply Or.inr
+            rw[h] at this
+            simp[this.2.1]
+            have hlt : i+1<source.size := by
+              rw[←h]
+              have := (mkIdx hss (hash k).toUSize).2
+              simp[mkIdx] at this
+              simp[this]
+            simp[hlt,this.2.1]
+            rw[Array.get_set_ne _ _ _ hlt (by simp_arith)]
+            simp[expand_WF_find?.find?_inv] at hf
+            have hf := (hf k).2 (by simp[mkIdx] ; rw[h] ; simp_arith)
+            simp[mkIdx] at hf
+            simp[hf.2,←h]
+          · intro h
+            simp_arith[h] at this
+            simp[this]
+            rw[Array.get_set_ne _ _ _ _ (by exact Nat.ne_of_lt h)]
+            simp[expand_WF_find?.find?_inv,mkIdx] at hf
+            simp[Nat.le_of_succ_le h,hf k]
+            have := (mkIdx ((by assumption):0<source.size) (hash k).toUSize).2
+            simp[mkIdx] at this
+            simp[this]
+      · exact hs₁ _ (Array.getElem_mem_data ..)
+      · have := ht.2 _ h₁ _ h₂
+        refine ⟨Nat.le_of_lt this, fun _ h h' => Nat.ne_of_lt this ?_⟩
+        exact LawfulHashable.hash_eq h' ▸ hs₂ _ H _ h
+      · case find_inv =>
+        simp[expand_WF_find?.find?_inv,mkIdx,H] at hf
+        intro _ _ k
+        simp[(hf k).1]
+    · exact ⟨ht.1, fun k =>
+        (hf k).1.1 (Nat.lt_of_lt_of_le
+          (mkIdx hss (hash k).toUSize).2
+          (Nat.le_of_not_lt (by assumption)))⟩
   termination_by source.size - i
 
 theorem insert_size [BEq α] [Hashable α] {m : Imp α β} {k v}
@@ -219,6 +359,44 @@ private theorem pairwise_replaceF [BEq α] [PartialEquivBEq α]
       | .inl eq => exact eq ▸ ne_true_of_eq_false e
       | .inr h => exact H.1 a h
 
+private theorem find?_replaceF [BEq α] [PartialEquivBEq α]
+    {l : List (α × β)} {f : α × β → β} :
+    (l.replaceF fun a => bif a.fst == k₁ then some (k₁, f a) else none).find?
+      (fun x => x.fst == k₂) =
+      if (k₂==k₁) then Option.map (fun a => (k₁, f a)) (l.find? (fun x => x.fst == k₂))
+      else l.find? (fun x => x.fst == k₂) := by
+  induction l with
+  | nil => simp
+  | cons a l ih =>
+    simp ; cases heq : k₂==k₁
+    case true =>
+      split
+      next h =>
+        unfold List.find?
+        have : ¬ a.fst == k₂ := by intro c ; simp[PartialEquivBEq.trans c heq] at h
+        simp[this,ih,heq]
+      next h =>
+        unfold List.find?
+        simp[cond] at h
+        split at h <;> try contradiction
+        have : a.fst == k₂ := PartialEquivBEq.trans (by assumption) (PartialEquivBEq.symm heq)
+        simp at h
+        simp[this,←h,PartialEquivBEq.symm heq]
+    case false =>
+      cases h : a.fst == k₂
+      case true =>
+        have : ¬ a.fst == k₁ := by
+          intro c ; simp[PartialEquivBEq.trans (PartialEquivBEq.symm h) c] at heq
+        simp[List.find?,h,this]
+      case false =>
+        split
+        next => simp[List.find?,h,ih,heq]
+        next h0 =>
+          simp[cond] at h0 ; split at h0 <;> try contradiction
+          simp at h0
+          have : ¬ k₁ == k₂ := by intro c ; simp[PartialEquivBEq.symm c] at heq
+          simp[List.find?,h,←h0,this]
+
 theorem insert_WF [BEq α] [Hashable α] {m : Imp α β} {k v}
     (h : m.buckets.WF) : (insert m k v).buckets.WF := by
   dsimp [insert, cond]; split
@@ -232,12 +410,73 @@ theorem insert_WF [BEq α] [Hashable α] {m : Imp α β} {k v}
       | .inr h => exact H _ h
   · next h₁ =>
     rw [Bool.eq_false_iff] at h₁; simp at h₁
-    suffices _ by split <;> [exact this; refine expand_WF this]
+    suffices _ by split <;> [exact this; refine (expand_WF_find? this).1]
     refine h.update (.cons ?_) (fun H a h => ?_)
     · exact fun a h h' => h₁ a h (PartialEquivBEq.symm h')
     · cases h with
       | head => rfl
       | tail _ h => exact H _ h
+
+private theorem exists_find?_of_mem {l : List α} {p : α → Bool} (h₁ : x ∈ l) (h₂ : p x) :
+    ∃ v, l.find? (fun a => p a) = some v := by
+  induction l with
+  | nil => contradiction
+  | cons y l ih =>
+    simp[List.find?]
+    split
+    next => simp
+    next =>
+      simp at h₁
+      cases h₁ with
+      | inl => simp[*] at h₂
+      | inr => simp[*]
+
+theorem insert_find? [BEq α] [Hashable α] [PartialEquivBEq α] [LawfulHashable α] {m : Imp α β}
+    {k₁ k₂ v} (h : m.buckets.WF) :
+    (insert m k₁ v).find? k₂ = if k₂ == k₁ then some v else m.find? k₂ := by
+  have f_update := Buckets.update_find? m.buckets
+  simp[Buckets.find?,mkIdx] at f_update
+  dsimp [insert, cond]; split
+  · next h₁ =>
+    simp at h₁; have ⟨x, hx₁, hx₂⟩ := h₁
+    simp[find?,mkIdx]
+    rw[f_update]
+    split
+    · next hasheq =>
+      simp[find?_replaceF]
+      split
+      · next hKeyEq =>
+        simp
+        apply exists_find?_of_mem hx₁
+        exact PartialEquivBEq.trans hx₂ (PartialEquivBEq.symm hKeyEq)
+      · next hKeyNeq =>
+        simp[hasheq]
+    · next hashneq =>
+      have : ¬ k₂ == k₁ := by intro c ; simp[LawfulHashable.hash_eq c] at hashneq
+      simp[this]
+  · next h₁ =>
+    rw [Bool.eq_false_iff] at h₁; simp at h₁
+    split <;> [unfold find?; (try rw[(expand_WF_find? ?WF).2] ; unfold Buckets.find? find?)]
+    case WF =>
+      refine h.update (.cons ?_) (fun H a h => ?_)
+      · exact fun a h h' => h₁ a h (PartialEquivBEq.symm h')
+      · cases h with
+        | head => rfl
+        | tail _ h => exact H _ h
+    all_goals next =>
+      simp[mkIdx,f_update]
+      split
+      · next hasheq =>
+        simp[List.find?]
+        split
+        · next hKeyEq =>
+          simp[PartialEquivBEq.symm hKeyEq]
+        · next hKeyNeq =>
+          have : ¬ k₂ == k₁ := by intro c ; simp[PartialEquivBEq.symm c] at hKeyNeq
+          simp[hasheq,this]
+      · next hashneq =>
+        have : ¬ k₂ == k₁ := by intro c ; simp[LawfulHashable.hash_eq c] at hashneq
+        simp[this]
 
 theorem erase_size [BEq α] [Hashable α] {m : Imp α β} {k}
     (h : m.size = m.buckets.size) :
